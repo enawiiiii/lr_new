@@ -1,0 +1,331 @@
+بناء نظام ويب لإدارة Laroza يشمل متجريْن منفصلين: بوتيك (In-store POS) وأونلاين (Orders management). عملة العرض: درهم / AED. دخول الموظفين عبر اختيار الاسم (مبدئياً: عبدالرحمن، هبه، هديل، وإمكانية إضافة موظفين). كل متجر يعمل منفصلًا (مخزون مشترك لكن عمليات البيع منفصلة من ناحية الواجهة والقواعد الضريبية).
+
+اقتراح التكنولوچيا (موصى به)
+
+Frontend: React مع Next.js (SSR/SPA) — سريع للنشر على Vercel، يدعم صفحات/API بسيطة وSEO. استخدام Tailwind CSS للمظهر السريع.
+
+Backend: Node.js + Express أو NestJS (أفضل لهيكلة مشاريع متوسطة). بديل: Django (Python) إذا تفضّل.
+
+Database: PostgreSQL (علاقات، JSONB لحقول معقدة مثل مواصفات أو تفصيل الألوان/مقاسات).
+
+File storage (صور): S3 أو أي خدمة تخزين سحابي (DigitalOcean Spaces، Cloud Storage) + CDN.
+
+Authentication: بسيطة MVP — اختيار موظف بدون كلمة مرور. لاحقًا يمكن JWT أو OAuth.
+
+Containerization & Deploy: Docker، Frontend على Vercel, Backend على Render/Heroku/AWS ECS, DB على RDS/Postgres managed.
+
+Background jobs (if needed for exports): RabbitMQ / Bull (Redis).
+
+Logging & Audit: Log entries في جدول منفصل لكل عملية بيع/مرتجع/تعديل.
+
+نمط البيانات (ERD مبسّط)
+
+الكيانات الأساسية:
+
+employees (موظفون)
+
+products (منتجات)
+
+product_variants (اللون/موديل/مقاس) أو product_colors + sizes
+
+inventory_items (product_code, color, size, quantity)
+
+sales (فواتير البوتيك)
+
+sale_items (sale_id, product_code, color, size, qty, unit_price)
+
+orders (طلبات الأونلاين)
+
+order_items
+
+returns_exchanges (سجل المرتجعات والتبادلات)
+
+exports (سجل عمليات التصدير)
+
+audit_logs
+
+جدول SQL مبدئي (Postgres — مختصر)
+CREATE TABLE employees (
+  id SERIAL PRIMARY KEY,
+  name TEXT NOT NULL,
+  role TEXT DEFAULT 'staff', -- 'manager' possible
+  created_at TIMESTAMP DEFAULT now()
+);
+
+CREATE TABLE products (
+  id SERIAL PRIMARY KEY,
+  product_code TEXT UNIQUE NOT NULL,
+  model_no TEXT,
+  brand TEXT,
+  product_type TEXT,
+  store_price NUMERIC(10,2),
+  online_price NUMERIC(10,2),
+  specs TEXT,
+  main_image_url TEXT,
+  created_at TIMESTAMP DEFAULT now()
+);
+
+CREATE TABLE product_colors (
+  id SERIAL PRIMARY KEY,
+  product_id INT REFERENCES products(id) ON DELETE CASCADE,
+  color_name TEXT,
+  color_swatch_url TEXT
+);
+
+CREATE TABLE product_sizes (
+  id SERIAL PRIMARY KEY,
+  color_id INT REFERENCES product_colors(id) ON DELETE CASCADE,
+  size_label TEXT,
+  quantity INT DEFAULT 0
+);
+
+CREATE TABLE sales (
+  id SERIAL PRIMARY KEY,
+  employee_id INT REFERENCES employees(id),
+  store_type TEXT NOT NULL, -- 'boutique' or 'online' (for phone/manual online creation)
+  payment_method TEXT, -- 'cash', 'visa', 'cod', 'bank'
+  tax_applied BOOLEAN DEFAULT FALSE,
+  tax_amount NUMERIC(10,2) DEFAULT 0,
+  total_amount NUMERIC(12,2),
+  created_at TIMESTAMP DEFAULT now()
+);
+
+CREATE TABLE sale_items (
+  id SERIAL PRIMARY KEY,
+  sale_id INT REFERENCES sales(id) ON DELETE CASCADE,
+  product_id INT REFERENCES products(id),
+  color_name TEXT,
+  size_label TEXT,
+  quantity INT,
+  unit_price NUMERIC(10,2)
+);
+
+CREATE TABLE orders (
+  id SERIAL PRIMARY KEY,
+  order_number TEXT UNIQUE,
+  customer_name TEXT,
+  phone TEXT,
+  emirate TEXT,
+  address TEXT,
+  tracking_number TEXT,
+  payment_method TEXT, -- 'cod' or 'bank'
+  status TEXT DEFAULT 'pending', -- pending, out_for_delivery, delivered, cancelled
+  employee_id INT REFERENCES employees(id),
+  created_at TIMESTAMP DEFAULT now()
+);
+
+CREATE TABLE order_items (
+  id SERIAL PRIMARY KEY,
+  order_id INT REFERENCES orders(id) ON DELETE CASCADE,
+  product_id INT REFERENCES products(id),
+  color_name TEXT,
+  size_label TEXT,
+  quantity INT,
+  unit_price NUMERIC(10,2)
+);
+
+CREATE TABLE returns_exchanges (
+  id SERIAL PRIMARY KEY,
+  type TEXT, -- 'refund' or 'exchange'
+  exchange_mode TEXT, -- 'color_to_color','size_to_size','model_to_model'
+  original_sale_id INT,
+  employee_id INT,
+  notes TEXT,
+  created_at TIMESTAMP DEFAULT now()
+);
+
+
+ملاحظة: يمكن حفظ تفاصيل المنتجات بالأداء المطلوب في JSONB إذا أردت سهولة التوسعة. لكن تقسيم Color → Size كما فوق يُسهّل العمليات على المخزون.
+
+واجهات الـ API المقترحة (REST)
+
+كل استجابة بالـ JSON، التحقق والصلاحيات حسب الدور.
+
+الموارد الأساسية
+
+POST /api/login/select-employee
+payload: { "employee_name": "عبدالرحمن" }
+يتعيد session أو token بسيط.
+
+GET /api/products
+query: ?q=&store=boutique|online&limit=... -> قائمة.
+
+POST /api/products
+body: form-data (multipart) مع image upload وحقول: product_code, model_no, brand, store_price, online_price, specs, colors [].
+
+PUT /api/products/:id — تعديل منتج (في-place).
+
+DELETE /api/products/:id — حذف.
+
+GET /api/products/:id/details — تفاصيل + color/size breakdown.
+
+POST /api/sales
+body: { employee_id, store_type: 'boutique', payment_method:'visa', tax_applied:true, items:[{product_id,color,size,qty,unit_price}], total_amount }
+
+POST /api/orders
+body: { customer_name, phone, emirate, address, payment_method, items: [...] }
+
+PUT /api/orders/:id/status — تغيير الحالة وكتابة تتبع.
+
+POST /api/returns
+body: { type:'refund'|'exchange', original_sale_id, employee_id, returned_item:{product_id,color,size,qty}, replacement_item: {...} }
+
+GET /api/exports/create?batchName=... — يركّب ملفات CSV، PDF techpacks، ويُعيد رابط تحميل ZIP.
+
+GET /api/inventory/report — تقرير للمخزون.
+
+سلوكيات مهمة (Business logic)
+
+كل عملية بيع (بوتيك/أونلاين) تُخصم من product_sizes.quantity مباشرة وبشكل تراكنشـي (transaction). إذا لم يتوفر المخزون، رفض الطلب أو السماح بإنشاء Backorder (اعرض تحذير).
+
+المرتجعات: ترجع الكمية إلى نفس color+size (refund). Exchange: ترجع الكمية للمقاس/اللون الأصلي وتخصم من الجديد؛ سجل العملية في returns_exchanges و audit_logs.
+
+الضريبة: بوتيك: فيزا → 5% على إجمالي الطلب بشكل افتراضي؛ زر إيقاف/تفعيل على مستوى الإعدادات ومدير يمكنه تجاوزها.
+
+تعديلات المبيعات: أي تعديل على sale_items يجب أن يعكس المخزون (زيادة/نقصان) مع تسجيل تاريخ التعديل.
+
+الصور: عند رفع صورة تخزن في S3، وتُسجل رابطها في products.main_image_url. عند التصدير، يتم تنزيل الصور وإدراجها في مجلد images/.
+
+واجهة المستخدم — مكونات Frontend (صفحات ومكونات)
+
+Login / Who are you?
+
+شاشة بها تحية: مرحبا — من أنت؟ + بطاقات الأسماء (عبدالرحمن، هبه، هديل، إضافة موظف).
+
+بعد اختيار الاسم: اختيار المتجر (بوتيك | أونلاين).
+
+شريط علوي يظهر: الموظف: [name] — متجر: [Boutique/Online] وزرين: تغيير الموظف وتغيير المتجر.
+
+Dashboard (Home)
+
+ترحيب، إحصائيات سريعة: عدد الأصناف، طلبات الأونلاين المفتوحة، مبيعات اليوم (AED).
+
+Inventory List
+
+Grid أو جدول: صورة كبيرة، كود المنتج بخط كبير، العلامة التجارية، السعران (Store / Online بالـ AED ودرهم)، إجمالي الكمية.
+
+أزرار لكل عنصر: تفاصيل / تعديل / حذف.
+
+Product Details Modal/Page
+
+صورة كبيرة جداً، كود المنتج كبير، موديل، مواصفات، جدول ألوان ← أعمدة المقاسات ← كميات (قابلة للعرض والتعديل).
+
+Add / Edit Product Form
+
+حقول نصية + مدير ألوان/مقاسات (أضف لون → أضف مقاسات لكل لون + كميات). رفع الصورة من الجهاز.
+
+Boutique POS
+
+واجهة سريعة: بحث/فلتر المنتجات (كود/براند)، اختيار المنتج → اختيار لون → اختيار مقاس → إضافة للسلة → الدفع.
+
+شاشة الدفع: اختيار Cash أو Visa (+عرض الضريبة إن وُجدت) → طباعة/حفظ الإيصال.
+
+Online Orders
+
+شاشة إنشاء طلب جديد (حقل كبير للعنوان، رقم تتبع قابل للتعديل، ملاحظات). طرق الدفع: COD أو Bank Transfer.
+
+جدول الطلبات مع حالات (Delivered, Out for delivery, Cancelled) وزر لتعديل الحالة.
+
+Returns / Exchanges
+
+واجهة لاختيار الفاتورة الأصلية أو الطلب → اختيار المنتج المرتجع → اختيار نوع العملية (Refund/Exchange) → لو Exchange اختر نوع التبديل (color, size, model) → تنفيذ مع تعديل المخزون.
+
+Exports
+
+شاشة توليد Export: حدد تاريخ/دفعة واسم المصنع → أنشئ ZIP يحتوي على مجلدات/CSV/PDF (التنسيق مثل المواصفة في الرد السابق).
+
+Settings
+
+إدارة الموظفين، Tax toggle (default 5% for visa), خيارات التصدير، قواعد الباك آب.
+
+تصدير الملفات للمصنع — بنية الملفات (مرة أخرى مختصرة)
+
+مجلد التصدير: LaRosa_Export_YYYY-MM-DD_ManufacturerName.zip يحتوي:
+
+product_catalog.csv — columns: product_code, model_no, brand, product_type, description, store_price_AED, online_price_AED, main_image_filename
+
+sizes_colors.csv — product_code, color_name, size, quantity
+
+price_list_AED.csv
+
+inventory_report.csv (possibly JSON cell per product)
+
+orders_for_manufacturer.csv — للطلبات المطلوبة
+
+techpacks/ (PDF per SKU)
+
+images/ (JPEG/PNG main images named by SKU)
+
+packaging_instructions.pdf
+
+readme.txt
+
+CSVs UTF-8، توصيف واضح، AED مع تسمية درهم بالعربية حيث يلزم.
+
+قواعد النشر/البيئة (Deployment)
+
+Frontend: Vercel (Next.js) — يستخدَم CDN لملفات الستاتيك.
+
+Backend: Render / Heroku / DigitalOcean App Platform (container)، أو AWS Elastic Beanstalk / ECS.
+
+Database: Managed PostgreSQL (RDS / DigitalOcean).
+
+Storage: S3 + CloudFront (أو Spaces + CDN).
+
+CI: GitHub Actions لتشغيل اختبارات ونشر تلقائي.
+
+نسخ احتياطي لقاعدة البيانات دوري يومي.
+
+أمن وعمليات
+
+استخدام HTTPS لكل الطلبات.
+
+صلاحيات: تمييز بين staff و manager (تعديل الضريبة، حذف منتجات).
+
+تحقق من صحة الملفات (حجم الصورة، نوع الملف).
+
+سجلات التدقيق (من الذي غيّر ماذا ومتى).
+
+تعامل تراكنشي مع تحديثات المخزون لمنع حالات السباق (Row locking أو استخدام transactions).
+
+أمثلة Payloads سريعة
+
+إنشاء بيع بوتيك (POST /api/sales)
+
+{
+  "employee_id": 1,
+  "store_type": "boutique",
+  "payment_method": "visa",
+  "tax_applied": true,
+  "items": [
+    { "product_id": 12, "color_name":"أحمر", "size_label":"M", "quantity":1, "unit_price":450.00 }
+  ],
+  "total_amount": 472.50
+}
+
+
+إنشاء طلب أونلاين (POST /api/orders)
+
+{
+  "order_number":"ORD-20250914-0001",
+  "customer_name":"Fatima",
+  "phone":"+971501234567",
+  "emirate":"Dubai",
+  "address":"Street 123, Building X, Apartment 45",
+  "payment_method":"cod",
+  "items":[
+    { "product_id": 12, "color_name":"أزرق", "size_label":"38", "quantity":2, "unit_price":420.00 }
+  ]
+}
+
+تسليمات مقترحة للمطورين فورًا
+
+مستودع Git: هيكل المشروع (nextjs/ backend/ db/ docs/).
+
+Postgres schema (ملف SQL أو migrations).
+
+ملف README يشرح endpoints المهمة وطريقة إطلاق المشروع محليًا.
+
+نماذج CSV فارغة مع رؤوس جاهزة للتصدير.
+
+Mock UI screens (Figma links) — إن أردت أجهز لك وصفات الواجهات.
